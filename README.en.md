@@ -130,7 +130,7 @@ This project welcomes review and feedback from the LINUX DO community: [LINUX DO
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `TOKEN` | **Yes** | none | Access token. Must match the `token=` in the `configUrl` at the end of the proxy module's `argument=`. Generate one with `openssl rand -hex 24`. |
+| `TOKEN` | **Yes** | none | Access token. Must match the `token=` in the `configUrl` at the end of the proxy module's `argument=`. Generate one with `openssl rand -hex 24`. **Accepts a comma-separated list** (`TOKEN=t1,t2,t3`); each token gets its own independent coordinates, so several people can share one deployment without overwriting each other. |
 | `PORT` | No | `8080` | Listen port; ports below 1024 require root. |
 | `CERT` | No | empty | HTTPS fullchain certificate path; HTTPS is used only when both `CERT` and `KEY` are set. |
 | `KEY` | No | empty | HTTPS private key path; used only when both `CERT` and `KEY` are set. |

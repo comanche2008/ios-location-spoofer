@@ -35,7 +35,7 @@ openssl rand -hex 24
 
    | 变量 | 值 | 说明 |
    |------|-----|------|
-   | `TOKEN` | 第一步生成的随机串 | **必填**，不填进程会直接退出 |
+   | `TOKEN` | 第一步生成的随机串 | **必填**，不填进程会直接退出。多人共用时用逗号分隔多个（见下方「多人共用」） |
    | `DATA_FILE` | `/data/loc.json` | 配合下面的 Volume 持久化坐标（Dockerfile 已内置同样的默认值，保险起见显式填一次） |
 
    `PORT` **不用填**：Dockerfile 里默认 8080，Railway 也会注入自己的 `PORT`，`server.js` 两种都认。
@@ -100,10 +100,34 @@ https://<你的服务>.up.railway.app/loc.json?token=<TOKEN>
 
 ---
 
-## 五、注意事项
+## 五、多人共用
+
+`TOKEN` 支持逗号分隔多个，**每个 token 拥有独立的坐标**，互不干扰：
+
+```
+TOKEN=973bcf...,a1b2c3...,d4e5f6...
+```
+
+服务端按 token 的 SHA-256 前 16 位分文件存放（`/data/loc-<hash>.json`），文件名里不含口令原文。
+
+加人流程：
+
+1. `openssl rand -hex 24` 生成一个新 token
+2. 追加到 Railway 的 `TOKEN` 变量末尾（用逗号分隔），服务会自动重启
+3. 把选点页地址 + 他的 token 发给他，模块 `configUrl` 里的 `token=` 也换成他的
+
+移除某人：把他的 token 从 `TOKEN` 里删掉即可，他的坐标文件会留在卷里但再也访问不到。
+
+> 从单 token 升级上来时，原来的 `loc.json` 会在首次启动时自动迁移给列表里的**第一个** token，坐标不丢。
+
+---
+
+## 六、注意事项
 
 - **口令即安全边界**：任何拿到 URL + TOKEN 的人都能读写你的定位。别把带 token 的链接贴进公开的 Issue / 截图。
-- **免费额度**：Railway 的免费/试用额度用完后服务会停，`configUrl` 拉不到就会回落到模块 `argument=` 里写死的坐标（脚本本身不会因此失效）。
+- **必须是 Hobby 及以上方案**：Railway 的 Trial 是**一次性** $5 / 30 天；用完或到期后掉到 Free 方案（$1/月额度）。**Free 方案不允许新建 project**——点 New Project 会直接弹 `Upgrade to create a new project`，报错 `Free plan resource provision limit exceeded`。这是「资源配额」闸，跟你还剩多少额度无关，$1/月 只够维持已经建好的资源。想用 Railway 就得升到 Hobby（$5/月，含 $5 用量）。
+- **成本预估**：常驻 Node 服务按内存 $10/GB-月 计，本服务空载约 60~80MB，月成本大致 $0.6~1，Hobby 自带的 $5 用量绰绰有余。
+- **不想付费**：用同仓库的 [Cloudflare Worker 版](worker/)，功能与本服务完全一致且长期免费。
 - **冷启动**：Railway 不会像 Serverless 那样休眠，但重新部署期间有几十秒不可用，期间脚本使用上一次缓存的远程配置。
 - **改坐标不用重新部署**：坐标存在卷里，改完在网页上点保存即可。只有改 `server.js` 才需要重新部署。
 - **换 TOKEN**：改 Variables 里的 `TOKEN` → 服务自动重启 → 记得同步更新模块里的 `configUrl` 和浏览器书签。

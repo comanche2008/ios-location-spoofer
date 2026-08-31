@@ -27,11 +27,17 @@ const path = require("path");
 
 const PORT = process.env.PORT || 8080;
 // TOKEN 必设：不设直接退出，绝不用弱口令兜底（否则任何人都能读写你的定位）
-const TOKEN = process.env.TOKEN || "";
-if (!TOKEN) {
+// 支持逗号分隔多个 token，每个 token 拥有独立的坐标文件，互不干扰：
+//   TOKEN=aaa...,bbb...,ccc...
+const TOKENS = String(process.env.TOKEN || "")
+  .split(",")
+  .map(function (t) { return t.trim(); })
+  .filter(function (t) { return t !== ""; });
+if (!TOKENS.length) {
   console.error(
     "启动失败：未设置 TOKEN 环境变量。请用随机字符串启动，例如：\n" +
-    "  TOKEN=$(openssl rand -hex 24) PORT=8080 node server.js"
+    "  TOKEN=$(openssl rand -hex 24) PORT=8080 node server.js\n" +
+    "多人共用时用逗号分隔：TOKEN=<token1>,<token2>,<token3>"
   );
   process.exit(1);
 }
@@ -61,7 +67,7 @@ const DEFAULT = {
 
 // 内存兜底：Railway 等 PaaS 若没挂载持久卷，磁盘只是临时的（重新部署会清空）。
 // 写盘失败时不让接口 500，先把状态留在内存里，并在日志里提示挂卷。
-var memoryLoc = null;
+var memoryLoc = {};   // token 文件路径 -> 坐标对象
 var persistent = true;
 var warnedWriteFail = false;
 
@@ -72,28 +78,53 @@ try {
   /* 目录创建失败留给下面的读写兜底处理 */
 }
 
-function readLoc() {
+// 每个 token 一个坐标文件：/data/loc.json -> /data/loc-<hash16>.json
+// 用哈希而不是 token 原文，避免把口令写进文件名（ls 一下就泄露）
+var DATA_DIR = path.dirname(DATA_FILE);
+var DATA_BASE = path.basename(DATA_FILE).replace(/\.json$/i, "");
+
+function tokenFile(token) {
+  var hash = crypto.createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+  return path.join(DATA_DIR, DATA_BASE + "-" + hash + ".json");
+}
+
+// 迁移：单 token 时代的 loc.json 归给列表里的第一个 token，避免升级后坐标丢失
+(function migrateLegacyFile() {
   try {
-    var parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    memoryLoc = parsed;
+    if (!fs.existsSync(DATA_FILE)) return;
+    var target = tokenFile(TOKENS[0]);
+    if (fs.existsSync(target)) return;
+    fs.copyFileSync(DATA_FILE, target);
+    console.log("已把 " + DATA_FILE + " 迁移为首个 token 的坐标文件：" + target);
+  } catch (e) {
+    console.log("迁移旧坐标文件失败（不影响使用）：" + e.message);
+  }
+})();
+
+function readLoc(token) {
+  var file = tokenFile(token);
+  try {
+    var parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    memoryLoc[file] = parsed;
     return parsed;
   } catch (e) {
-    if (memoryLoc) return memoryLoc;
+    if (memoryLoc[file]) return memoryLoc[file];
     return Object.assign({}, DEFAULT);
   }
 }
 
-function writeLoc(obj) {
-  memoryLoc = obj; // 先更新内存，保证即使磁盘不可写接口也返回最新值
+function writeLoc(token, obj) {
+  var file = tokenFile(token);
+  memoryLoc[file] = obj; // 先更新内存，保证即使磁盘不可写接口也返回最新值
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
+    fs.writeFileSync(file, JSON.stringify(obj, null, 2));
     persistent = true;
   } catch (e) {
     persistent = false;
     if (!warnedWriteFail) {
       warnedWriteFail = true;
       console.log(
-        "写入 " + DATA_FILE + " 失败（" + e.message + "）：坐标只保存在内存里，" +
+        "写入 " + file + " 失败（" + e.message + "）：坐标只保存在内存里，" +
         "重启/重新部署会丢失。Railway 请给服务挂一个 Volume 并把挂载路径设为 DATA_FILE 所在目录。"
       );
     }
@@ -110,16 +141,24 @@ function send(res, code, type, body) {
 }
 
 // 区分「没传 token」和「token 传错」：前者 401 引导补 ?token=，后者 403
-function checkToken(token, res) {
+// 命中则返回该 token（调用方用它定位到对应的坐标文件），未命中返回 null 并已写好响应
+function resolveToken(token, res) {
   if (token == null || token === "") {
-    send(res, 401, "application/json", '{"error":"missing token","hint":"add ?token=<TOKEN> to the URL (must match the TOKEN env var)"}');
-    return false;
+    send(res, 401, "application/json", '{"error":"missing token","hint":"add ?token=<TOKEN> to the URL (must match one of the TOKEN env var values)"}');
+    return null;
   }
-  if (!safeEqual(token, TOKEN)) {
+  // 逐个比对，全程走常量时间比较，不因命中位置不同而泄露信息
+  var matched = null;
+  for (var i = 0; i < TOKENS.length; i += 1) {
+    if (safeEqual(token, TOKENS[i])) {
+      matched = TOKENS[i];
+    }
+  }
+  if (!matched) {
     send(res, 403, "application/json", '{"error":"bad token"}');
-    return false;
+    return null;
   }
-  return true;
+  return matched;
 }
 
 function handler(req, res) {
@@ -131,19 +170,22 @@ function handler(req, res) {
     return send(res, 200, "application/json", JSON.stringify({
       ok: true,
       persistent: persistent,
-      dataFile: DATA_FILE
+      dataFile: DATA_FILE,
+      tokens: TOKENS.length
     }));
   }
 
   // ---- Shadowrocket 读取坐标（存的就是 WGS-84，Apple 需要的格式） ----
   if (url.pathname === "/loc.json" && req.method === "GET") {
-    if (!checkToken(token, res)) return;
-    return send(res, 200, "application/json", JSON.stringify(readLoc()));
+    var owner = resolveToken(token, res);
+    if (!owner) return;
+    return send(res, 200, "application/json", JSON.stringify(readLoc(owner)));
   }
 
   // ---- 网页保存（前端已转好 WGS-84 再发过来；海拔/精度可选） ----
   if (url.pathname === "/set" && req.method === "POST") {
-    if (!checkToken(token, res)) return;
+    var setOwner = resolveToken(token, res);
+    if (!setOwner) return;
     let body = "";
     req.on("data", function (c) {
       body += c;
@@ -160,7 +202,7 @@ function handler(req, res) {
         ) {
           return send(res, 400, "application/json", '{"error":"bad coords"}');
         }
-        const cur = readLoc();
+        const cur = readLoc(setOwner);
         cur.enabled = true; // 保存一个新位置 = 开启伪造
         cur.latitude = la;
         cur.longitude = lo;
@@ -173,7 +215,7 @@ function handler(req, res) {
         setInt("altitude", j.altitude);
         setInt("horizontalAccuracy", j.horizontalAccuracy);
         setInt("verticalAccuracy", j.verticalAccuracy);
-        writeLoc(cur);
+        writeLoc(setOwner, cur);
         return send(res, 200, "application/json", JSON.stringify(cur));
       } catch (e) {
         return send(res, 400, "application/json", '{"error":"bad json"}');
@@ -184,7 +226,8 @@ function handler(req, res) {
 
   // ---- 一键切换：伪造 / 恢复真实定位 ----
   if (url.pathname === "/enable" && req.method === "POST") {
-    if (!checkToken(token, res)) return;
+    var enableOwner = resolveToken(token, res);
+    if (!enableOwner) return;
     let body = "";
     req.on("data", function (c) {
       body += c;
@@ -193,9 +236,9 @@ function handler(req, res) {
     req.on("end", function () {
       try {
         const j = JSON.parse(body);
-        const cur = readLoc();
+        const cur = readLoc(enableOwner);
         cur.enabled = j.enabled !== false; // false=恢复真实定位（脚本放行）
-        writeLoc(cur);
+        writeLoc(enableOwner, cur);
         return send(res, 200, "application/json", JSON.stringify(cur));
       } catch (e) {
         return send(res, 400, "application/json", '{"error":"bad json"}');
@@ -206,7 +249,7 @@ function handler(req, res) {
 
   // ---- 地图网页（与 Worker 版一致，必须带正确 token） ----
   if (url.pathname === "/" && req.method === "GET") {
-    if (!checkToken(token, res)) return;
+    if (!resolveToken(token, res)) return;
     return send(res, 200, "text/html; charset=utf-8", PAGE);
   }
 

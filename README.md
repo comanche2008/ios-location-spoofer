@@ -182,7 +182,7 @@ https://你的worker.workers.dev/loc.json?token=你的TOKEN
 
 | 变量 | 是否必设 | 默认值 | 说明 |
 |------|---------|--------|------|
-| `TOKEN` | **必设** | 无 | 访问口令，与模块 `argument=` 末尾 `configUrl` 里的 `token=` 必须一致。建议 `openssl rand -hex 24` 生成 |
+| `TOKEN` | **必设** | 无 | 访问口令，与模块 `argument=` 末尾 `configUrl` 里的 `token=` 必须一致。建议 `openssl rand -hex 24` 生成。**支持逗号分隔多个**（`TOKEN=t1,t2,t3`），每个 token 拥有独立坐标，多人共用时互不干扰 |
 | `PORT` | 否 | `8080` | 监听端口；1024 以下需 root |
 | `CERT` | 否 | 空 | HTTPS 证书 fullchain 路径；与 `KEY` 同时设置才走 https |
 | `KEY` | 否 | 空 | HTTPS 私钥路径；与 `CERT` 同时设置才走 https |
