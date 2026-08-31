@@ -188,6 +188,8 @@ https://你的worker.workers.dev/loc.json?token=你的TOKEN
 | `KEY` | 否 | 空 | HTTPS 私钥路径；与 `CERT` 同时设置才走 https |
 | `DATA_FILE` | 否 | 同目录 `loc.json` | 坐标存放路径；容器/Railway 挂卷时指向卷内路径（如 `/data/loc.json`），目录会自动创建 |
 
+选点页的**地名搜索**和**海拔获取**依赖 Nominatim / open-meteo，这两个在中国大陆直连不通。页面会先试直连（超时 3.5 秒），失败则自动回落到服务端转发接口 `GET /geocode` 和 `GET /elevation`（都需要 token），由服务器代为请求——因此国内直连也能正常搜索和取海拔。`/geocode` 按 Nominatim 使用条款限流到 1 请求/秒，超出返回 429。
+
 服务另有 `GET /health`（**无需 token**）用于探活，返回 `{"ok":true,"persistent":true,...}`；`persistent` 为 `false` 表示磁盘写入失败、坐标只在内存里（重启即丢），多半是容器没挂持久卷。
 
 启动示例：

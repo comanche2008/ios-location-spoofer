@@ -131,6 +131,51 @@ function writeLoc(token, obj) {
   }
 }
 
+// ---- 上游转发：给国内直连不通的第三方 API 兜底 ----
+// 浏览器优先直连，失败/超时才回落到这里，所以正常情况下这两个接口很少被调用。
+// Nominatim 使用条款要求带可识别的 User-Agent，并把频率压在 1 请求/秒以内。
+const USER_AGENT =
+  "ios-location-spoofer-picker/1.0 (+https://github.com/mekos2772/ios-location-spoofer)";
+const UPSTREAM_TIMEOUT = 5000;      // Railway 在美国且无代理，5 秒是充分上界
+const UPSTREAM_MAX_BYTES = 512 * 1024;
+var lastGeocodeAt = 0;
+
+function proxyUpstream(targetUrl, res, headers, timeoutMs) {
+  var settled = false;
+  function fail(code, msg) {
+    if (settled) return;
+    settled = true;
+    send(res, code, "application/json", JSON.stringify({ error: msg }));
+  }
+  var upReq = https.get(targetUrl, { headers: headers || {} }, function (up) {
+    if (up.statusCode < 200 || up.statusCode >= 300) {
+      up.resume();
+      return fail(502, "upstream " + up.statusCode);
+    }
+    var body = "";
+    up.setEncoding("utf8");
+    up.on("data", function (c) {
+      body += c;
+      if (body.length > UPSTREAM_MAX_BYTES) {
+        upReq.destroy();
+        fail(502, "upstream response too large");
+      }
+    });
+    up.on("end", function () {
+      if (settled) return;
+      settled = true;
+      send(res, 200, "application/json", body);
+    });
+  });
+  upReq.setTimeout(timeoutMs || UPSTREAM_TIMEOUT, function () {
+    upReq.destroy();
+    fail(504, "upstream timeout");
+  });
+  upReq.on("error", function (e) {
+    fail(502, "upstream error: " + e.message);
+  });
+}
+
 function send(res, code, type, body) {
   res.writeHead(code, {
     "Content-Type": type,
@@ -173,6 +218,45 @@ function handler(req, res) {
       dataFile: DATA_FILE,
       tokens: TOKENS.length
     }));
+  }
+
+  // ---- 地名搜索转发（Nominatim 国内直连不通；浏览器直连失败才会走到这里） ----
+  if (url.pathname === "/geocode" && req.method === "GET") {
+    if (!resolveToken(token, res)) return;
+    var q = String(url.searchParams.get("q") || "").trim();
+    if (!q) {
+      return send(res, 400, "application/json", '{"error":"missing q"}');
+    }
+    // 所有人共用服务端一个 IP，不节流容易触发 Nominatim 封禁
+    var nowTs = Date.now();
+    if (nowTs - lastGeocodeAt < 1000) {
+      return send(res, 429, "application/json", '{"error":"rate limited","hint":"Nominatim 限 1 请求/秒，请稍后重试"}');
+    }
+    lastGeocodeAt = nowTs;
+    return proxyUpstream(
+      "https://nominatim.openstreetmap.org/search?format=json&addressdetails=0&limit=8&q=" +
+        encodeURIComponent(q),
+      res,
+      { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh" }
+    );
+  }
+
+  // ---- 海拔转发（open-meteo 免费额度 1 万次/天，政策宽松，不做节流） ----
+  if (url.pathname === "/elevation" && req.method === "GET") {
+    if (!resolveToken(token, res)) return;
+    var elat = Number(url.searchParams.get("lat"));
+    var elng = Number(url.searchParams.get("lng"));
+    if (
+      !isFinite(elat) || !isFinite(elng) ||
+      elat < -90 || elat > 90 || elng < -180 || elng > 180
+    ) {
+      return send(res, 400, "application/json", '{"error":"bad coords"}');
+    }
+    return proxyUpstream(
+      "https://api.open-meteo.com/v1/elevation?latitude=" + elat + "&longitude=" + elng,
+      res,
+      { "User-Agent": USER_AGENT }
+    );
   }
 
   // ---- Shadowrocket 读取坐标（存的就是 WGS-84，Apple 需要的格式） ----
@@ -537,13 +621,49 @@ function toggleEnabled(){
 function dispPos(){return datum==="gcj"?GCJ.wgs2gcj(WGS.lat,WGS.lng):[WGS.lat,WGS.lng];}
 function toWgs(lat,lng){lng=wrapLng(lng);return datum==="gcj"?GCJ.gcj2wgs(lat,lng):[lat,lng];}
 
+// 第三方 API（Nominatim / open-meteo）国内直连不通：先试直连，失败再回落到服务端转发。
+// 直连正常耗时实测 1.4~2.1 秒，所以超时给到 3.5 秒，避免把慢请求误判成不可达。
+// 探测到不通后记一个标记，本次会话后续直接走转发，不用每次干等；
+// 标记 60 秒过期，防止一次偶发抖动把整个会话钉死在转发上。
+var DIRECT_TIMEOUT=3500, DIRECT_STICKY_MS=60000, directBrokenAt=0;
+function directLooksBroken(){
+  return directBrokenAt>0 && (Date.now()-directBrokenAt)<DIRECT_STICKY_MS;
+}
+function upstream(directUrl, proxyPath){
+  function viaProxy(){
+    return fetch(proxyPath).then(function(r){
+      if(!r.ok) throw new Error("proxy "+r.status);
+      return r.json();
+    });
+  }
+  if(directLooksBroken()) return viaProxy();
+  return new Promise(function(resolve,reject){
+    var settled=false;
+    var timer=setTimeout(function(){
+      if(settled)return;
+      settled=true; directBrokenAt=Date.now(); reject(new Error("direct timeout"));
+    },DIRECT_TIMEOUT);
+    fetch(directUrl).then(function(r){
+      if(!r.ok) throw new Error("direct "+r.status);
+      return r.json();
+    }).then(function(d){
+      if(settled)return;
+      settled=true; clearTimeout(timer); directBrokenAt=0; resolve(d);
+    }).catch(function(e){
+      if(settled)return;
+      settled=true; clearTimeout(timer); directBrokenAt=Date.now(); reject(e);
+    });
+  }).catch(viaProxy);
+}
+
 // 按地形取海拔（open-meteo 免费高程接口，传 WGS-84）
 function fetchElevation(lat,lng){
   lng=wrapLng(lng);
-  return fetch("https://api.open-meteo.com/v1/elevation?latitude="+lat+"&longitude="+lng)
-    .then(function(r){return r.json();})
-    .then(function(d){return (d&&d.elevation&&d.elevation.length)?d.elevation[0]:null;})
-    .catch(function(){return null;});
+  return upstream(
+    "https://api.open-meteo.com/v1/elevation?latitude="+lat+"&longitude="+lng,
+    "/elevation?lat="+lat+"&lng="+lng+"&token="+encodeURIComponent(token)
+  ).then(function(d){return (d&&d.elevation&&d.elevation.length)?d.elevation[0]:null;})
+   .catch(function(){return null;});
 }
 
 // 移动定位点(图钉)：只预览，不保存
@@ -611,8 +731,10 @@ function locateCurrent(){
 // 搜索：列出多个候选，点选只移动地图视野（不动定位点、不保存）
 function search(){
   var q=$("q").value.trim(); if(!q) return;
-  fetch("https://nominatim.openstreetmap.org/search?format=json&addressdetails=0&limit=8&q="+encodeURIComponent(q))
-    .then(function(r){return r.json();})
+  upstream(
+    "https://nominatim.openstreetmap.org/search?format=json&addressdetails=0&limit=8&q="+encodeURIComponent(q),
+    "/geocode?q="+encodeURIComponent(q)+"&token="+encodeURIComponent(token)
+  )
     .then(function(a){
       var box=$("results"); box.innerHTML="";
       if(!a||!a.length){ box.classList.remove("show"); toast("没找到"); return; }
