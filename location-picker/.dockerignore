@@ -2,3 +2,7 @@ worker/
 cloudflare-webui/
 .git/
 *.md
+.env
+.env.example
+railway.json
+loc.json

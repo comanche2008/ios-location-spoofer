@@ -97,6 +97,7 @@ location-spoofer-config.json        # Config sample
 使用教程.md                         # Step-by-step tutorial (Chinese)
 location-picker/                    # Optional: web map picker (Node or Cloudflare Worker)
 location-picker/worker/             # Cloudflare Worker version (no VPS; supports Loon configUrl)
+location-picker/RAILWAY.md          # Railway deployment guide
 ```
 
 ## Optional: web map location picker
@@ -109,6 +110,7 @@ Change location often and tired of looking up coordinates by hand? The bundled [
 |--------|-----------|----------|
 | **Cloudflare Worker — Wrangler CLI** (recommended) | [`location-picker/worker/`](location-picker/worker/) | No VPS, HTTPS included; comfortable with the CLI |
 | **Cloudflare Worker — dashboard** | [`location-picker/cloudflare-webui/`](location-picker/cloudflare-webui/) | No VPS, HTTPS included; no npm/Wrangler — paste a single file |
+| **Railway** | [`location-picker/RAILWAY.md`](location-picker/RAILWAY.md) | No VPS, HTTPS domain included; runs the full Node version instead of a Worker |
 | Self-hosted Node | [`location-picker/server.js`](location-picker/server.js) | You have your own VPS / NAS |
 | Docker | [`location-picker/Dockerfile`](location-picker/Dockerfile) | You have Docker |
 
@@ -132,6 +134,9 @@ This project welcomes review and feedback from the LINUX DO community: [LINUX DO
 | `PORT` | No | `8080` | Listen port; ports below 1024 require root. |
 | `CERT` | No | empty | HTTPS fullchain certificate path; HTTPS is used only when both `CERT` and `KEY` are set. |
 | `KEY` | No | empty | HTTPS private key path; used only when both `CERT` and `KEY` are set. |
+| `DATA_FILE` | No | `loc.json` next to `server.js` | Where coordinates are stored. Point it inside a mounted volume (e.g. `/data/loc.json`) on Docker / Railway; the directory is created automatically. |
+
+The server also exposes `GET /health` (**no token required**) for liveness probes, returning `{"ok":true,"persistent":true,...}`. A `persistent` of `false` means the disk write failed and coordinates live only in memory (lost on restart) — usually a container without a persistent volume.
 
 Startup examples:
 

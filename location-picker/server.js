@@ -59,16 +59,45 @@ const DEFAULT = {
   verticalAccuracy: 1000
 };
 
+// 内存兜底：Railway 等 PaaS 若没挂载持久卷，磁盘只是临时的（重新部署会清空）。
+// 写盘失败时不让接口 500，先把状态留在内存里，并在日志里提示挂卷。
+var memoryLoc = null;
+var persistent = true;
+var warnedWriteFail = false;
+
+// DATA_FILE 指向 /data/loc.json 这类挂载点时，目录可能还不存在
+try {
+  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+} catch (e) {
+  /* 目录创建失败留给下面的读写兜底处理 */
+}
+
 function readLoc() {
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    var parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    memoryLoc = parsed;
+    return parsed;
   } catch (e) {
+    if (memoryLoc) return memoryLoc;
     return Object.assign({}, DEFAULT);
   }
 }
 
 function writeLoc(obj) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
+  memoryLoc = obj; // 先更新内存，保证即使磁盘不可写接口也返回最新值
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
+    persistent = true;
+  } catch (e) {
+    persistent = false;
+    if (!warnedWriteFail) {
+      warnedWriteFail = true;
+      console.log(
+        "写入 " + DATA_FILE + " 失败（" + e.message + "）：坐标只保存在内存里，" +
+        "重启/重新部署会丢失。Railway 请给服务挂一个 Volume 并把挂载路径设为 DATA_FILE 所在目录。"
+      );
+    }
+  }
 }
 
 function send(res, code, type, body) {
@@ -96,6 +125,15 @@ function checkToken(token, res) {
 function handler(req, res) {
   const url = new URL(req.url, "http://" + (req.headers.host || "localhost"));
   const token = url.searchParams.get("token");
+
+  // ---- 健康检查（无需 token，供 Railway / Docker 探活） ----
+  if (url.pathname === "/health" && req.method === "GET") {
+    return send(res, 200, "application/json", JSON.stringify({
+      ok: true,
+      persistent: persistent,
+      dataFile: DATA_FILE
+    }));
+  }
 
   // ---- Shadowrocket 读取坐标（存的就是 WGS-84，Apple 需要的格式） ----
   if (url.pathname === "/loc.json" && req.method === "GET") {

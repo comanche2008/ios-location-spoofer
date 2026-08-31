@@ -153,6 +153,7 @@ location-picker/                     # 进阶（可选）：网页地图选点
 location-picker/server.js            # Node 自托管版
 location-picker/worker/              # Cloudflare Worker 版（免 VPS）
 location-picker/cloudflare-webui/    # 网页后台版
+location-picker/RAILWAY.md           # Railway 部署指南
 ```
 
 ---
@@ -165,6 +166,7 @@ location-picker/cloudflare-webui/    # 网页后台版
 |---------|------|------|
 | **Cloudflare Worker — Wrangler CLI**（推荐） | [`location-picker/worker/`](location-picker/worker/) | 免 VPS、自带 HTTPS；熟悉命令行 |
 | **Cloudflare Worker — 网页后台** | [`location-picker/cloudflare-webui/`](location-picker/cloudflare-webui/) | 免 VPS、自带 HTTPS；不想装 npm / Wrangler |
+| **Railway** | [`location-picker/RAILWAY.md`](location-picker/RAILWAY.md) | 免 VPS、自带 HTTPS 域名；想跑完整 Node 版而不是 Worker |
 | Node 自托管 | [`location-picker/server.js`](location-picker/server.js) | 有自己的 VPS / NAS |
 | Docker | [`location-picker/Dockerfile`](location-picker/Dockerfile) | 有 Docker 环境 |
 
@@ -184,6 +186,9 @@ https://你的worker.workers.dev/loc.json?token=你的TOKEN
 | `PORT` | 否 | `8080` | 监听端口；1024 以下需 root |
 | `CERT` | 否 | 空 | HTTPS 证书 fullchain 路径；与 `KEY` 同时设置才走 https |
 | `KEY` | 否 | 空 | HTTPS 私钥路径；与 `CERT` 同时设置才走 https |
+| `DATA_FILE` | 否 | 同目录 `loc.json` | 坐标存放路径；容器/Railway 挂卷时指向卷内路径（如 `/data/loc.json`），目录会自动创建 |
+
+服务另有 `GET /health`（**无需 token**）用于探活，返回 `{"ok":true,"persistent":true,...}`；`persistent` 为 `false` 表示磁盘写入失败、坐标只在内存里（重启即丢），多半是容器没挂持久卷。
 
 启动示例：
 
